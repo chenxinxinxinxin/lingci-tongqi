@@ -1,5 +1,6 @@
 {
-  "description": "项目配置文件",
+  "description": "心有灵犀双人猜词小游戏",
+  "cloudfunctionRoot": "cloudfunctions/",
   "setting": {
     "urlCheck": false,
     "es6": true,
@@ -48,7 +49,13 @@
   },
   "simulatorPluginLibVersion": {},
   "packOptions": {
-    "ignore": [],
+    "ignore": [
+      { "type": "folder", "value": "cloudfunctions" },
+      { "type": "folder", "value": "tests" },
+      { "type": "folder", "value": "scripts" },
+      { "type": "folder", "value": "docs" },
+      { "type": "file", "value": "package.json" }
+    ],
     "include": []
   },
   "isGameTourist": false,

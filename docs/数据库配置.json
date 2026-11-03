@@ -1,0 +1,22 @@
+{
+  "environment": "wordtune-d4gl8hb7gf0d380b7",
+  "note": "配置清单，不会自动修改云端。每个集合需在官方控制台创建并保存权限规则。",
+  "collections": [
+    { "name": "rooms", "permissions": { "read": false, "write": false }, "indexes": [
+      { "name": "status_expiry", "unique": false, "fields": [{ "name": "status", "direction": "asc" }, { "name": "expiresAt", "direction": "asc" }] }
+    ] },
+    { "name": "room_codes", "permissions": { "read": false, "write": false }, "indexes": [] },
+    { "name": "room_members", "permissions": { "read": false, "write": false }, "indexes": [] },
+    { "name": "round_submissions", "permissions": { "read": false, "write": false }, "indexes": [] },
+    { "name": "room_events", "permissions": { "read": false, "write": false }, "indexes": [
+      { "name": "expiry", "unique": false, "fields": [{ "name": "expiresAt", "direction": "asc" }] }
+    ] },
+    { "name": "player_room_views", "permissions": { "read": "doc._openid == auth.openid", "write": false }, "indexes": [] },
+    { "name": "operation_receipts", "permissions": { "read": false, "write": false }, "indexes": [
+      { "name": "expiry", "unique": false, "fields": [{ "name": "expiresAt", "direction": "asc" }] }
+    ] },
+    { "name": "operation_limits", "permissions": { "read": false, "write": false }, "indexes": [
+      { "name": "expiry", "unique": false, "fields": [{ "name": "expiresAt", "direction": "asc" }] }
+    ] }
+  ]
+}
