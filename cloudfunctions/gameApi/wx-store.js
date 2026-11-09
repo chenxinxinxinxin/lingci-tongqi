@@ -20,7 +20,7 @@ function createWxStore(db) {
     },
     async findExpiredRooms(time, limit) {
       const result = await db.collection('rooms').where({
-        status: db.command.in(['waiting', 'playing', 'matched']),
+        status: db.command.in(['waiting', 'playing', 'revealed', 'matched']),
         expiresAt: db.command.lte(time)
       }).limit(limit).get();
       return result.data.map(room => room._id);
@@ -43,6 +43,13 @@ function createWxStore(db) {
         }
       }
       return count;
+    },
+    async findHistory(roomId, beforeSequence, limit) {
+      const where = { roomId, type: db.command.in(['mismatch', 'matched']) };
+      if (beforeSequence) where.sequence = db.command.lt(beforeSequence);
+      const result = await db.collection('room_events').where(where).orderBy('sequence', 'desc').limit(limit + 1).get();
+      const events = result.data.slice(0, limit).map(({ _id, ...event }) => event);
+      return { events, hasMore: result.data.length > limit };
     }
   };
 }

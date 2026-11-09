@@ -24,7 +24,11 @@ function fixture() {
     assert.equal(joined.ok, true);
     return { roomId: joined.data.roomId, expectedRound: 1, expectedAttempt: 1 };
   }
-  return { store, service, send, pair, advance: milliseconds => { time += milliseconds; } };
+  async function continueBoth(room) {
+    await send('synthetic-player-A', 'readyNextRound', room);
+    return send('synthetic-player-B', 'readyNextRound', room);
+  }
+  return { store, service, send, pair, continueBoth, advance: milliseconds => { time += milliseconds; } };
 }
 
 test('room code preserves leading zeros and existing members keep their seat', async () => {
@@ -78,7 +82,7 @@ test('simultaneous equal submissions settle once and remove private words', asyn
   assert.deepEqual(f.store.all('player_room_views').map(view => view.status), ['matched', 'matched']);
 });
 
-test('different words start one new attempt without recording either answer', async () => {
+test('different words reveal both answers and wait for both players before continuing', async () => {
   const f = fixture();
   const room = await f.pair();
   await Promise.all([
@@ -86,13 +90,19 @@ test('different words start one new attempt without recording either answer', as
     f.send('synthetic-player-B', 'submitWord', { ...room, word: '香蕉' })
   ]);
   const state = f.store.all('rooms')[0];
-  assert.equal(state.attempt, 2);
-  assert.equal(state.status, 'playing');
+  assert.equal(state.attempt, 1);
+  assert.equal(state.status, 'revealed');
   assert.equal(state.latestEvent.type, 'mismatch');
   assert.equal(f.store.all('round_submissions').length, 0);
-  const persisted = JSON.stringify([...f.store.records.values()]);
-  assert.equal(persisted.includes('苹果'), false);
-  assert.equal(persisted.includes('香蕉'), false);
+  assert.deepEqual(state.latestEvent.words, ['苹果', '香蕉']);
+  assert.deepEqual(state.history[0].words, ['苹果', '香蕉']);
+  const restored = await f.send('synthetic-player-B', 'resumeRoom');
+  assert.deepEqual(restored.data.history[0].words, ['苹果', '香蕉']);
+  const first = await f.send('synthetic-player-A', 'readyNextRound', room);
+  assert.equal(first.data.status, 'revealed');
+  const next = await f.send('synthetic-player-B', 'readyNextRound', room);
+  assert.equal(next.data.status, 'playing'); assert.equal(next.data.attempt, 2);
+  assert.deepEqual(next.data.history[0].words, ['苹果', '香蕉']);
 });
 
 test('internal spacing and punctuation remain significant', async () => {
@@ -100,9 +110,12 @@ test('internal spacing and punctuation remain significant', async () => {
   const room = await f.pair();
   await f.send('synthetic-player-B', 'submitWord', { ...room, word: '开 心' });
   await f.send('synthetic-player-A', 'submitWord', { ...room, word: '开心' });
+  await f.continueBoth(room);
   const second = { ...room, expectedAttempt: 2 };
   await f.send('synthetic-player-A', 'submitWord', { ...second, word: '苹果！' });
   await f.send('synthetic-player-B', 'submitWord', { ...second, word: '苹果' });
+  assert.equal(f.store.all('rooms')[0].status, 'revealed');
+  await f.continueBoth(second);
   assert.equal(f.store.all('rooms')[0].attempt, 3);
 });
 
@@ -132,6 +145,7 @@ test('retrying a lost submission response never submits the previous answer into
   const command = { ...room, word: '苹果', requestId: 'synthetic_lost_response' };
   await f.send('synthetic-player-A', 'submitWord', command);
   await f.send('synthetic-player-B', 'submitWord', { ...room, word: '香蕉' });
+  await f.continueBoth(room);
   const replay = await f.send('synthetic-player-A', 'submitWord', command);
   assert.equal(replay.ok, true);
   assert.equal(replay.data.replayed, true);
@@ -145,6 +159,7 @@ test('a delayed command from a previous attempt leaves the new attempt unchanged
   const room = await f.pair();
   await f.send('synthetic-player-A', 'submitWord', { ...room, word: '云' });
   await f.send('synthetic-player-B', 'submitWord', { ...room, word: '雨' });
+  await f.continueBoth(room);
   const delayed = await f.send('synthetic-player-A', 'submitWord', { ...room, word: '云' });
   assert.equal(delayed.code, 'STALE_ATTEMPT');
   assert.equal(f.store.all('rooms')[0].attempt, 2);
@@ -233,4 +248,60 @@ test('concurrent deliveries of one command create only one private submission', 
   assert.ok(results.every(result => result.ok));
   assert.equal(results.filter(result => result.data.replayed).length, 1);
   assert.equal(f.store.all('round_submissions').length, 1);
+});
+
+test('history keeps more than twenty results, pages without gaps, and rejects outsiders', async () => {
+  const f = fixture(), room = await f.pair();
+  for (let attempt = 1; attempt <= 23; attempt++) {
+    const current = { ...room, expectedAttempt: attempt };
+    await f.send('synthetic-player-B', 'submitWord', { ...current, word: `乙${attempt}` });
+    await f.send('synthetic-player-A', 'submitWord', { ...current, word: `甲${attempt}` });
+    if (attempt < 23) await f.continueBoth(current);
+  }
+  const restored = await f.send('synthetic-player-A', 'resumeRoom');
+  assert.equal(restored.data.history.length, 20);
+  assert.deepEqual(restored.data.history.at(-1).words, ['甲23', '乙23']);
+  const page1 = await f.send('synthetic-player-B', 'getHistory', { roomId: room.roomId });
+  assert.equal(page1.data.events.length, 20); assert.equal(page1.data.hasMore, true);
+  const page2 = await f.send('synthetic-player-A', 'getHistory', { roomId: room.roomId, beforeSequence: page1.data.events.at(-1).sequence });
+  assert.equal(page2.data.events.length, 3); assert.equal(page2.data.hasMore, false);
+  assert.deepEqual([...page1.data.events, ...page2.data.events].map(e => e.attempt), Array.from({ length: 23 }, (_, i) => 23 - i));
+  const stranger = await f.send('synthetic-player-C', 'getHistory', { roomId: room.roomId });
+  assert.equal(stranger.code, 'ROOM_UNAVAILABLE');
+});
+
+test('a stale continue cannot prepare a later reveal within the same round', async () => {
+  const f = fixture(), room = await f.pair();
+  await f.send('synthetic-player-A', 'submitWord', { ...room, word: '云' });
+  await f.send('synthetic-player-B', 'submitWord', { ...room, word: '雨' });
+  await f.continueBoth(room);
+  const second = { ...room, expectedAttempt: 2 };
+  await f.send('synthetic-player-A', 'submitWord', { ...second, word: '雪' });
+  await f.send('synthetic-player-B', 'submitWord', { ...second, word: '雪' });
+  const stale = await f.send('synthetic-player-A', 'readyNextRound', room);
+  assert.equal(stale.code, 'STALE_ATTEMPT');
+  assert.deepEqual(f.store.all('rooms')[0].ready, [false, false]);
+});
+
+test('profiles propagate to both players, persist across rooms, and replay safely', async () => {
+  const f = fixture();
+  const profile = { nickname: '小云朵', avatar: 'https://thirdwx.qlogo.cn/mmopen/example/132' };
+  const command = { profile, requestId: 'synthetic_profile_save' };
+  await f.send('synthetic-player-A', 'updateProfile', command);
+  const replay = await f.send('synthetic-player-A', 'updateProfile', command);
+  assert.equal(replay.data.replayed, true);
+  const reused = await f.send('synthetic-player-A', 'updateProfile', { ...command, profile: { nickname: '别人', avatar: '' } });
+  assert.equal(reused.code, 'REQUEST_ID_REUSED');
+  assert.deepEqual((await f.send('synthetic-player-A', 'resumeRoom')).data.profile, profile);
+  const room = await f.pair();
+  const second = { nickname: '小星星', avatar: 'data:image/jpeg;base64,YWJj' };
+  await f.send('synthetic-player-B', 'updateProfile', { profile: second });
+  const restored = await f.send('synthetic-player-A', 'resumeRoom');
+  assert.deepEqual(restored.data.players.map(p => p.profile), [profile, second]);
+  assert.deepEqual(f.store.all('player_room_views')[0].players[1].profile, second);
+  await f.send('synthetic-player-A', 'leaveRoom', { roomId: room.roomId });
+  const next = await f.send('synthetic-player-A', 'createRoom');
+  assert.deepEqual(next.data.players[0].profile, profile);
+  const bad = await f.send('synthetic-player-A', 'updateProfile', { profile: { nickname: '名字', avatar: 'https://example.com/avatar.jpg' } });
+  assert.equal(bad.code, 'INVALID_AVATAR');
 });

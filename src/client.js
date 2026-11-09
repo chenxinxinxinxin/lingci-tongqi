@@ -7,20 +7,30 @@ const ERRORS = {
   INVALID_WORD: '请输入 1–20 个字，不能包含换行', STALE_ATTEMPT: '已进入新尝试，请重新想一个词',
   STALE_ROUND: '已经进入新一轮啦', ALREADY_SUBMITTED: '你已经提交，等待搭档就好',
   NOT_PLAYING: '等待搭档加入后再提交', ROUND_NOT_FINISHED: '这一轮还没有结束',
-  IDENTITY_REQUIRED: '微信身份暂时不可用，请重新进入游戏'
+  IDENTITY_REQUIRED: '微信身份暂时不可用，请重新进入游戏',
+  INVALID_PROFILE: '昵称请输入 1–16 个字', INVALID_AVATAR: '头像无法使用，请重新选择'
 };
-const LIVE = s => s && ['waiting', 'playing', 'matched'].includes(s.status);
+const LIVE = s => s && ['waiting', 'playing', 'revealed', 'matched'].includes(s.status);
 const PENDING_KEY = 'wordtune.pending.v1';
 class GameClient {
   constructor(platform) {
     this.wx = platform;
-    this.page = 'home'; this.room = null; this.word = ''; this.code = '';
+    this.page = 'profile'; this.room = null; this.word = ''; this.code = '';
     this.message = ''; this.busy = false; this.online = true; this.foreground = true;
     this.syncing = false; this.watcher = null; this.watchGeneration = 0;
     this.retryTimer = null; this.heartbeatTimer = null; this.retryCount = 0;
     this.pending = null; this.onChange = () => {};
+    this.profile = { nickname: '', avatar: '' }; this.history = [];
+    this.profileDraft = { ...this.profile };
+    this.historyMore = false; this.historyBusy = false; this.historyMessage = '';
   }
-  changed() { this.onChange(); }
+  get profileReady() { return !!(this.profile.wechatAuthorized && this.profile.nickname && this.profile.avatar); }
+  changed() {
+    if (!this.profileReady && this.page !== 'profile') {
+      this.profileReturn = this.page; this.page = 'profile'; this.profileDraft = { ...this.profile };
+    }
+    this.onChange();
+  }
   readPending() {
     try { const p = this.wx.getStorageSync(PENDING_KEY); if (p?.requestId && p?.action) this.pending = p; }
     catch (_) { /* A failed write blocks new mutations below. */ }
@@ -53,33 +63,78 @@ class GameClient {
     if (/^\d{6}$/.test(code || '') && !LIVE(this.room)) { this.code = code; this.page = 'join'; }
   }
   shareData() {
-    return { title: '心有灵犀｜各想一个词，看看能不能想到一起', query: LIVE(this.room) ? `roomCode=${this.room.roomCode}` : '' };
+    return { title: '灵词同契｜各想一个词，看看能不能想到一起', query: LIVE(this.room) ? `roomCode=${this.room.roomCode}` : '' };
   }
   accept(snapshot, enter = false) {
     if (!snapshot?.roomId) return;
     if (this.room?.roomId === snapshot.roomId && snapshot.version < this.room.version) return;
     const previous = this.room;
+    if (previous?.roomId !== snapshot.roomId) { this.history = []; this.historyMore = false; this.historyExhausted = false; this.historyMessage = ''; }
+    // A long disconnection can skip more than the snapshot's twenty-result window.
+    // Restart pagination from that contiguous window instead of keeping a hidden gap.
+    const cache = snapshot.history || [];
+    if (cache.length >= 20 && this.history.length && cache[cache.length - 1].sequence > this.history[0].sequence &&
+      !cache.some(e => this.history.some(old => old.id === e.id))) {
+      this.history = []; this.historyExhausted = false;
+    }
     this.room = { ...snapshot, viewId: snapshot.viewId || snapshot._id || previous?.viewId };
+    this.profile = this.room.players[this.room.ownSeat].profile || this.profile;
+    this.mergeHistory(cache);
+    if (cache.length >= 20 && !this.historyExhausted) this.historyMore = true;
     if (!previous || previous.roomId !== snapshot.roomId || previous.round !== snapshot.round || previous.attempt !== snapshot.attempt) this.word = '';
     if (enter) this.page = 'room';
     if (!LIVE(this.room)) this.stopSync();
     this.changed();
   }
+  mergeHistory(events) {
+    this.history = [...new Map([...this.history, ...events].map(e => [e.id, e])).values()].sort((a, b) => b.sequence - a.sequence);
+  }
+  acceptResult(action, data) {
+    if (action === 'updateProfile') {
+      this.profile = data.profile; this.message = '资料已保存，搭档也能看到啦';
+      this.page = this.profileReturn || (this.code ? 'join' : 'home');
+    } else if (action === 'leaveRoom') {
+      this.stopSync(); this.room = null; this.word = ''; this.history = []; this.historyMore = false;
+      this.page = 'home'; this.message = ''; this.changed();
+    } else this.accept(data, true);
+  }
+  async loadHistory() {
+    if (!this.room || this.historyBusy) return;
+    const roomId = this.room.roomId;
+    const beforeSequence = this.history.length ? this.history[this.history.length - 1].sequence : undefined;
+    this.historyBusy = true; this.historyMessage = ''; this.changed();
+    try {
+      const result = await this.api({ action: 'getHistory', roomId, ...(beforeSequence ? { beforeSequence } : {}) });
+      if (this.room?.roomId !== roomId) return;
+      if (!result.ok) throw new Error('HISTORY');
+      this.mergeHistory(result.data.events); this.historyMore = result.data.hasMore;
+      this.historyExhausted = !result.data.hasMore;
+    } catch (_) { if (this.room?.roomId === roomId) this.historyMessage = '记录加载失败，点此重试'; }
+    finally { this.historyBusy = false; this.changed(); }
+  }
+  editProfile() {
+    this.profileReturn = this.page; this.profileDraft = { ...this.profile };
+    this.page = 'profile'; this.message = ''; this.changed();
+  }
+  saveProfile() { return this.mutate('updateProfile', { profile: this.profileDraft }); }
   async recover() {
     if (!this.foreground || !this.online || this.busy || this.syncing) return;
     this.syncing = true; this.message = ''; this.changed();
     try {
       if (this.pending) {
+        const action = this.pending.action;
         const result = await this.api(this.pending);
         if (result.code === 'SERVICE_BUSY') throw new Error('RETRY_PENDING');
         this.clearPending();
-        if (result.ok) this.accept(result.data, true); else this.message = ERRORS[result.code] || '操作未完成，请重试';
+        if (result.ok) this.acceptResult(action, result.data); else this.message = ERRORS[result.code] || '操作未完成，请重试';
       }
       const result = await this.api({ action: 'resumeRoom' });
       if (result.ok && result.data.roomId) this.accept(result.data);
-      else if (result.ok) { this.room = null; if (this.page === 'room') this.page = 'home'; }
+      else if (result.ok) { this.room = null; this.profile = result.data.profile || this.profile; if (this.page === 'room') this.page = 'home'; }
       else this.message = ERRORS[result.code] || '房间暂时无法恢复';
       this.retryCount = 0;
+      if (!this.profileReady) this.profileDraft = { ...this.profile };
+      else if (this.page === 'profile' && !this.profileReturn) this.page = this.code ? 'join' : 'home';
       if (LIVE(this.room)) this.startSync();
     } catch (_) {
       this.message = this.pending ? '正在确认上次操作，点击重试不会重复提交' : '连接暂时中断，点击重试';
@@ -131,6 +186,9 @@ class GameClient {
   }
   async mutate(action, fields = {}) {
     if (this.busy || this.syncing) return;
+    if (action !== 'updateProfile' && action !== 'leaveRoom' && !this.profileReady) {
+      this.page = 'profile'; this.message = '请先授权微信头像和昵称，再进入游戏'; this.changed(); return;
+    }
     if (this.pending) { await this.recover(); return; }
     if (!this.online) { this.message = '网络断开啦，连接后再试'; this.changed(); return; }
     this.busy = true; this.message = ''; this.changed();
@@ -143,7 +201,7 @@ class GameClient {
       const result = await this.api(payload);
       if (result.code === 'SERVICE_BUSY') throw new Error('RETRY_PENDING');
       this.clearPending();
-      if (result.ok) { this.accept(result.data, true); if (LIVE(this.room)) this.startSync(); }
+      if (result.ok) { this.acceptResult(action, result.data); if (LIVE(this.room)) this.startSync(); }
       else {
         this.message = ERRORS[result.code] || '操作未完成，请稍后重试';
         if (['STALE_ATTEMPT', 'STALE_ROUND', 'ALREADY_SUBMITTED'].includes(result.code)) this.scheduleRecovery();
@@ -164,7 +222,7 @@ class GameClient {
   }
   ready() {
     const r = this.room;
-    if (r?.status === 'matched' && !r.players[r.ownSeat].ready) return this.mutate('readyNextRound', { roomId: r.roomId, expectedRound: r.round });
+    if (['matched', 'revealed'].includes(r?.status) && !r.players[r.ownSeat].ready) return this.mutate('readyNextRound', { roomId: r.roomId, expectedRound: r.round, expectedAttempt: r.attempt });
   }
   leave() {
     this.wx.showModal({ title: '退出这个房间？', content: '退出会结束整个房间，搭档也需要重新加入。', confirmText: '退出房间', confirmColor: '#547D9B',

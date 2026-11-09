@@ -55,7 +55,12 @@ function createMemoryStore() {
     },
     async findExpiredRooms(time, limit) {
       return this.all('rooms').filter(room => room.expiresAt <= time &&
-        ['waiting', 'playing', 'matched'].includes(room.status)).slice(0, limit).map(room => room.id);
+        ['waiting', 'playing', 'revealed', 'matched'].includes(room.status)).slice(0, limit).map(room => room.id);
+    },
+    async findHistory(roomId, beforeSequence, limit) {
+      const results = this.all('room_events').filter(e => e.roomId === roomId && ['mismatch', 'matched'].includes(e.type) && e.sequence && (!beforeSequence || e.sequence < beforeSequence))
+        .sort((a, b) => b.sequence - a.sequence);
+      return { events: results.slice(0, limit), hasMore: results.length > limit };
     },
     async purgeExpired(time, limit) {
       let removed = 0;

@@ -1,5 +1,5 @@
 {
-  "description": "心有灵犀双人猜词小游戏",
+  "description": "灵词同契双人猜词小游戏",
   "cloudfunctionRoot": "cloudfunctions/",
   "setting": {
     "urlCheck": false,

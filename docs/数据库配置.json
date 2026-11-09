@@ -9,7 +9,8 @@
     { "name": "room_members", "permissions": { "read": false, "write": false }, "indexes": [] },
     { "name": "round_submissions", "permissions": { "read": false, "write": false }, "indexes": [] },
     { "name": "room_events", "permissions": { "read": false, "write": false }, "indexes": [
-      { "name": "expiry", "unique": false, "fields": [{ "name": "expiresAt", "direction": "asc" }] }
+      { "name": "expiry", "unique": false, "fields": [{ "name": "expiresAt", "direction": "asc" }] },
+      { "name": "room_result_history", "unique": false, "fields": [{ "name": "roomId", "direction": "asc" }, { "name": "type", "direction": "asc" }, { "name": "sequence", "direction": "desc" }] }
     ] },
     { "name": "player_room_views", "permissions": { "read": "doc._openid == auth.openid", "write": false }, "indexes": [] },
     { "name": "operation_receipts", "permissions": { "read": false, "write": false }, "indexes": [
